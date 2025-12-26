@@ -27,8 +27,9 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Run sold export
-        env:
-          SOURCE_URL: ${{ inputs.source_url }}
-          SHEETS_WEBHOOK_URL: ${{ secrets.SHEETS_WEBHOOK_URL }}
-          SHEETS_AUTH_TOKEN: ${{ secrets.SHEETS_AUTH_TOKEN }}
+env:
+  SOURCE_URL: ${{ inputs.source_url }}
+  SHEETS_WEBHOOK_URL: ${{ secrets.SHEETS_WEBHOOK_URL_NEW }}
+  SHEETS_AUTH_TOKEN: ${{ secrets.SHEETS_AUTH_TOKEN_NEW }}
+
         run: node sold_export.js
