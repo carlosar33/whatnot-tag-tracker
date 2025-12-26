@@ -45,34 +45,38 @@ async function main() {
   await page.goto(PAGE_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
   await page.waitForTimeout(6000);
 
-  // 🔎 Quick bot-block detection hints
   const title = await page.title().catch(() => "");
   const url = page.url();
-  const bodyText = await page.evaluate(() => document.body?.innerText?.slice(0, 4000) || "").catch(() => "");
+  const bodyText = await page
+    .evaluate(() => document.body?.innerText?.slice(0, 4000) || "")
+    .catch(() => "");
 
   const looksBlocked =
     /access denied|forbidden|unusual traffic|verify you are human|captcha|cloudflare|attention required/i.test(
       `${title}\n${url}\n${bodyText}`
     );
 
-  // ✅ Instead of waitForSelector(visible), poll for presence of anchors
+  // Poll for tag anchors instead of waiting for "visible"
   const deadline = Date.now() + 120000;
   let anchorCount = 0;
 
   while (Date.now() < deadline) {
-    anchorCount = await page.evaluate(() => document.querySelectorAll('a[href^="/tag/"]').length).catch(() => 0);
+    anchorCount = await page
+      .evaluate(() => document.querySelectorAll('a[href^="/tag/"]').length)
+      .catch(() => 0);
 
     if (anchorCount > 0) break;
 
-    // Scroll a bit to trigger any lazy rendering
     await page.mouse.wheel(0, 1200).catch(() => {});
     await page.waitForTimeout(2500);
   }
 
   if (anchorCount === 0) {
-    console.log("❌ No /tag/ anchors found. Title:", title);
-    console.log("Current URL:", url);
+    console.log("❌ No /tag/ anchors found.");
+    console.log("Title:", title);
+    console.log("URL:", url);
     console.log("Blocked heuristics:", looksBlocked);
+
     await saveDebug(page, "debug");
     await browser.close();
 
@@ -112,7 +116,6 @@ async function main() {
       out.push({ tag, watchers: best.watchers, watching_text: best.watching_text });
     }
 
-    // de-dupe by tag
     const map = new Map();
     for (const r of out) {
       const prev = map.get(r.tag);
@@ -150,4 +153,3 @@ main().catch((err) => {
   console.error(err);
   process.exit(1);
 });
-`
