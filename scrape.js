@@ -56,7 +56,7 @@ async function main() {
       `${title}\n${url}\n${bodyText}`
     );
 
-  // Poll for tag anchors instead of waiting for "visible"
+  // Poll for tag anchors; also do some small scrolling to trigger lazy rendering.
   const deadline = Date.now() + 120000;
   let anchorCount = 0;
 
@@ -87,6 +87,12 @@ async function main() {
     );
   }
 
+  // One more gentle scroll + settle to improve chances counts load for key tiles
+  await page.mouse.wheel(0, 1600).catch(() => {});
+  await page.waitForTimeout(2000);
+  await page.mouse.wheel(0, -1600).catch(() => {});
+  await page.waitForTimeout(2000);
+
   const rows = await page.evaluate(() => {
     const out = [];
     const links = [...document.querySelectorAll('a[href^="/tag/"]')];
@@ -99,23 +105,59 @@ async function main() {
       return Number.isFinite(n) ? { watchers: n, watching_text: t } : null;
     }
 
-    for (const a of links) {
-      const tag = (a.getAttribute("href") || "").replace("/tag/", "");
+    // Find a good container around the link where the watchers count often lives
+    function findTile(a) {
+      let n = a;
+      for (let i = 0; i < 10 && n; i++) {
+        const txt = n.textContent || "";
+        if (/watching|viewers?|watchers?/i.test(txt)) return n;
+        n = n.parentElement;
+      }
+      // fallback: a reasonable container
+      return a.parentElement || a;
+    }
 
-      const texts = [...a.querySelectorAll("span,div,p,strong")]
-        .map((n) => (n.textContent || "").trim())
+    for (const a of links) {
+      const href = a.getAttribute("href") || "";
+      const tag = href.replace("/tag/", "");
+
+      const tile = findTile(a);
+
+      // Scan all text inside the tile (count is often a sibling of the <a>)
+      const tileBits = (tile.textContent || "")
+        .split("\n")
+        .map((s) => s.trim())
         .filter(Boolean);
 
       let best = null;
-      for (const t of texts) {
+
+      for (const t of tileBits) {
         const p = parseCount(t);
         if (p && (!best || p.watchers > best.watchers)) best = p;
       }
+
+      // Backup: scan inside the anchor only
+      if (!best) {
+        const inner = [...a.querySelectorAll("span,div,p,strong")]
+          .map((n) => (n.textContent || "").trim())
+          .filter(Boolean);
+
+        for (const t of inner) {
+          const p = parseCount(t);
+          if (p && (!best || p.watchers > best.watchers)) best = p;
+        }
+      }
+
       if (!best) continue;
 
-      out.push({ tag, watchers: best.watchers, watching_text: best.watching_text });
+      out.push({
+        tag,
+        watchers: best.watchers,
+        watching_text: best.watching_text,
+      });
     }
 
+    // De-dupe by tag (keep max watchers)
     const map = new Map();
     for (const r of out) {
       const prev = map.get(r.tag);
@@ -126,9 +168,16 @@ async function main() {
 
   await browser.close();
 
+  // Ensure disneyana always exists in the output so your sheet doesn't have gaps
+  const finalRows = [...rows];
+  const hasDisneyana = finalRows.some((r) => r.tag === "disneyana");
+  if (!hasDisneyana) {
+    finalRows.push({ tag: "disneyana", watchers: 0, watching_text: "NOT_FOUND" });
+  }
+
   const payload = {
     token: TOKEN,
-    rows: rows.map((r) => ({
+    rows: finalRows.map((r) => ({
       ts: nowISO(),
       page: PAGE_URL,
       tag: r.tag,
@@ -146,7 +195,7 @@ async function main() {
   const text = await res.text();
   if (!res.ok) throw new Error(`Webhook failed (${res.status}): ${text}`);
 
-  console.log(`✅ Sent ${rows.length} rows. Response: ${text}`);
+  console.log(`✅ Sent ${finalRows.length} rows. Response: ${text}`);
 }
 
 main().catch((err) => {
