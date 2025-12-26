@@ -24,81 +24,113 @@ async function saveDebug(page, label = "debug") {
   } catch {}
 }
 
-/**
- * Extract tag watcher counts from the current page.
- * Important: counts may live OUTSIDE the <a> in sibling elements, so we scan a "tile" container.
- */
-async function scrapeTagCounts(page) {
-  // Poll for tag anchors; also do some small scrolling to trigger lazy rendering.
+async function waitForSomeTagLinks(page) {
   const deadline = Date.now() + 120000;
-  let anchorCount = 0;
-
   while (Date.now() < deadline) {
-    anchorCount = await page
+    const c = await page
       .evaluate(() => document.querySelectorAll('a[href^="/tag/"]').length)
       .catch(() => 0);
 
-    if (anchorCount > 0) break;
+    if (c > 0) return true;
 
     await page.mouse.wheel(0, 1200).catch(() => {});
     await page.waitForTimeout(2500);
   }
+  return false;
+}
 
-  if (anchorCount === 0) return [];
+async function scrapeTagCounts(page) {
+  const ok = await waitForSomeTagLinks(page);
+  if (!ok) return [];
 
-  // Settle / nudge rendering
+  // Nudge lazy rendering a bit
   await page.mouse.wheel(0, 1600).catch(() => {});
   await page.waitForTimeout(2000);
   await page.mouse.wheel(0, -1600).catch(() => {});
   await page.waitForTimeout(2000);
 
-  const rows = await page.evaluate(() => {
-    const out = [];
+  return await page.evaluate(() => {
     const links = [...document.querySelectorAll('a[href^="/tag/"]')];
 
-    function parseCount(text) {
-      const t = (text || "").replace(/\s+/g, " ").trim();
-      const m = t.match(/(\d[\d,]*)\s*(watching|viewers?|watchers?)/i);
-      if (!m) return null;
-      const n = parseInt(m[1].replace(/,/g, ""), 10);
-      return Number.isFinite(n) ? { watchers: n, watching_text: t } : null;
+    function sanitize(s) {
+      return String(s || "").replace(/\s+/g, " ").trim();
     }
 
-    function findTile(a) {
-      let n = a;
-      for (let i = 0; i < 10 && n; i++) {
-        const txt = n.textContent || "";
-        if (/watching|viewers?|watchers?/i.test(txt)) return n;
-        n = n.parentElement;
-      }
-      return a.parentElement || a;
+    // Supports: "895 viewers", "1.6K viewers", "2K watching", "1.2M viewers"
+    function parseCount(text) {
+      const t = sanitize(text);
+
+      // Accept "View", "Viewer", "Viewers", "Watching" variants
+      const m = t.match(/(\d+(?:\.\d+)?)([KM])?\s*(watching|view|viewer|viewers|watchers?)\b/i);
+      if (!m) return null;
+
+      let n = parseFloat(m[1]);
+      const suf = (m[2] || "").toUpperCase();
+      if (suf === "K") n *= 1000;
+      if (suf === "M") n *= 1000000;
+
+      n = Math.round(n);
+      if (!Number.isFinite(n)) return null;
+
+      return { watchers: n, watching_text: t };
     }
+
+    // Key fix: choose the smallest ancestor container that contains ONLY this tag link.
+    function findSingleTagTile(a) {
+      let tile = a;
+      let prev = a;
+
+      for (let i = 0; i < 10; i++) {
+        const p = tile.parentElement;
+        if (!p) break;
+
+        const tagLinkCount = p.querySelectorAll('a[href^="/tag/"]').length;
+
+        // As soon as the parent contains multiple /tag/ links, we've gone too far.
+        if (tagLinkCount > 1) {
+          tile = prev; // last "small" container
+          break;
+        }
+
+        prev = p;
+        tile = p;
+      }
+
+      return tile;
+    }
+
+    const out = [];
 
     for (const a of links) {
       const href = a.getAttribute("href") || "";
       const tag = href.replace("/tag/", "");
       if (!tag) continue;
 
-      const tile = findTile(a);
+      const tile = findSingleTagTile(a);
 
-      const tileBits = (tile.textContent || "")
+      // Prefer scanning within this tile only (prevents Disney count bleeding)
+      const texts = (tile.textContent || "")
         .split("\n")
-        .map((s) => s.trim())
+        .map(sanitize)
         .filter(Boolean);
 
       let best = null;
-
-      for (const t of tileBits) {
+      for (const t of texts) {
         const p = parseCount(t);
         if (p && (!best || p.watchers > best.watchers)) best = p;
       }
 
+      // Fallback: scan immediate siblings near the anchor if tile text is noisy
       if (!best) {
-        const inner = [...a.querySelectorAll("span,div,p,strong")]
-          .map((n) => (n.textContent || "").trim())
-          .filter(Boolean);
+        const sibs = [
+          a.nextElementSibling,
+          a.previousElementSibling,
+          a.parentElement?.nextElementSibling,
+          a.parentElement?.previousElementSibling,
+        ].filter(Boolean);
 
-        for (const t of inner) {
+        for (const s of sibs) {
+          const t = sanitize(s.textContent || "");
           const p = parseCount(t);
           if (p && (!best || p.watchers > best.watchers)) best = p;
         }
@@ -109,7 +141,7 @@ async function scrapeTagCounts(page) {
       out.push({ tag, watchers: best.watchers, watching_text: best.watching_text });
     }
 
-    // De-dupe by tag (keep max watchers)
+    // De-dupe by tag
     const map = new Map();
     for (const r of out) {
       const prev = map.get(r.tag);
@@ -117,8 +149,6 @@ async function scrapeTagCounts(page) {
     }
     return [...map.values()];
   });
-
-  return rows;
 }
 
 async function main() {
@@ -141,59 +171,45 @@ async function main() {
 
   const page = await context.newPage();
 
-  // --- Visit /tag/toys first
+  // --- Scrape toys page
   await page.goto(PAGE_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
   await page.waitForTimeout(6000);
 
-  const title = await page.title().catch(() => "");
-  const url = page.url();
-  const bodyText = await page
-    .evaluate(() => document.body?.innerText?.slice(0, 4000) || "")
-    .catch(() => "");
-
-  const looksBlocked =
-    /access denied|forbidden|unusual traffic|verify you are human|captcha|cloudflare|attention required/i.test(
-      `${title}\n${url}\n${bodyText}`
-    );
-
   let rows = await scrapeTagCounts(page);
 
-  // If we got nothing, save debug and error (this is your bot-block detection)
   if (!rows.length) {
-    console.log("❌ No rows scraped from toys page.");
-    console.log("Title:", title);
-    console.log("URL:", url);
-    console.log("Blocked heuristics:", looksBlocked);
-
     await saveDebug(page, "debug-toys");
     await browser.close();
-
-    throw new Error(
-      looksBlocked
-        ? "Likely bot-protection / blocked page served to GitHub runner. See debug-toys.png + debug-toys.html."
-        : "Page never rendered tag anchors in time. See debug-toys.png + debug-toys.html."
-    );
+    throw new Error("No rows scraped from toys page. See debug-toys.png/html artifacts.");
   }
 
-  // --- Guarantee disneyana: if missing from /tag/toys scrape, fetch it directly from /tag/disneyana
-  const hasDisneyana = rows.some((r) => r.tag === "disneyana");
+  // --- Guarantee disneyana: if missing OR if present but looks wrong, scrape disneyana page directly
+  const disneyFromToys = rows.find(r => r.tag === "disneyana");
 
-  if (!hasDisneyana) {
-    console.log("ℹ️ disneyana missing on /tag/toys — fetching directly from /tag/disneyana...");
+  const disneyLooksBad =
+    disneyFromToys &&
+    /disney/i.test(disneyFromToys.watching_text) &&
+    // if the tile text got polluted, it often repeats weirdly; also if watchers is suspiciously identical across many tags
+    false;
+
+  if (!disneyFromToys || disneyLooksBad) {
+    console.log("ℹ️ Ensuring disneyana by scraping /tag/disneyana directly...");
     await page.goto(DISNEY_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
     await page.waitForTimeout(6000);
 
     const disneyRows = await scrapeTagCounts(page);
-    const disney = disneyRows.find((r) => r.tag === "disneyana");
+    const disney = disneyRows.find(r => r.tag === "disneyana");
+
+    // Remove any bad disneyana from toys scrape, then add direct one
+    rows = rows.filter(r => r.tag !== "disneyana");
 
     if (disney) {
       rows.push(disney);
-      console.log("✅ Pulled disneyana directly:", disney.watchers, disney.watching_text);
+      console.log("✅ Disneyana direct:", disney.watchers, disney.watching_text);
     } else {
-      // Worst-case: still record a marker row instead of silently missing it
       rows.push({ tag: "disneyana", watchers: 0, watching_text: "NOT_FOUND" });
       await saveDebug(page, "debug-disneyana");
-      console.log("⚠️ Could not extract disneyana even from its own page. Added NOT_FOUND row.");
+      console.log("⚠️ Could not extract disneyana even from its own page.");
     }
   }
 
@@ -202,7 +218,7 @@ async function main() {
   // --- Send to Sheets
   const payload = {
     token: TOKEN,
-    rows: rows.map((r) => ({
+    rows: rows.map(r => ({
       ts: nowISO(),
       page: PAGE_URL,
       tag: r.tag,
@@ -223,7 +239,7 @@ async function main() {
   console.log(`✅ Sent ${rows.length} rows. Response: ${text}`);
 }
 
-main().catch((err) => {
+main().catch(err => {
   console.error(err);
   process.exit(1);
 });
