@@ -3,15 +3,17 @@ name: Whatnot Tag Tracker
 on:
   schedule:
     - cron: "*/30 * * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: "20"
 
@@ -21,18 +23,8 @@ jobs:
       - name: Install Playwright
         run: npx playwright install --with-deps chromium
 
-           - name: Run scraper
+      - name: Run scraper
         env:
           SHEETS_WEBHOOK_URL: ${{ secrets.SHEETS_WEBHOOK_URL }}
           SHEETS_AUTH_TOKEN: ${{ secrets.SHEETS_AUTH_TOKEN }}
         run: node scrape.js
-
-      - name: Upload debug artifacts (if any)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: whatnot-debug
-          path: |
-            debug.png
-            debug.html
-          if-no-files-found: ignore
