@@ -28,3 +28,13 @@ jobs:
           SHEETS_WEBHOOK_URL: ${{ secrets.SHEETS_WEBHOOK_URL }}
           SHEETS_AUTH_TOKEN: ${{ secrets.SHEETS_AUTH_TOKEN }}
         run: node scrape.js
+
+      - name: Upload debug artifacts (if any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: whatnot-debug
+          path: |
+            debug.png
+            debug.html
+          if-no-files-found: ignore
