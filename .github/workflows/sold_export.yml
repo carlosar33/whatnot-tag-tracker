@@ -1,0 +1,34 @@
+name: Whatnot Sold Export (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_url:
+        description: "Paste the Whatnot link to open (the page where you can click Shop -> Sold)"
+        required: true
+        type: string
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        run: npm install
+
+      - name: Install Playwright (Chromium)
+        run: npx playwright install --with-deps chromium
+
+      - name: Run sold export
+        env:
+          SOURCE_URL: ${{ inputs.source_url }}
+          SHEETS_WEBHOOK_URL: ${{ secrets.SHEETS_WEBHOOK_URL }}
+          SHEETS_AUTH_TOKEN: ${{ secrets.SHEETS_AUTH_TOKEN }}
+        run: node sold_export.js
