@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       source_url:
-        description: "Paste the Whatnot link to open (the page where you can click Shop -> Sold)"
+        description: "Paste the Whatnot link to open (page where Shop -> Sold exists)"
         required: true
         type: string
 
@@ -27,9 +27,8 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Run sold export
-env:
-  SOURCE_URL: ${{ inputs.source_url }}
-  SHEETS_WEBHOOK_URL: ${{ secrets.SHEETS_WEBHOOK_URL_NEW }}
-  SHEETS_AUTH_TOKEN: ${{ secrets.SHEETS_AUTH_TOKEN_NEW }}
-
+        env:
+          SOURCE_URL: ${{ inputs.source_url }}
+          SHEETS_WEBHOOK_URL: ${{ secrets.SHEETS_WEBHOOK_URL_NEW }}
+          SHEETS_AUTH_TOKEN: ${{ secrets.SHEETS_AUTH_TOKEN_NEW }}
         run: node sold_export.js
