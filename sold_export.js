@@ -1,6 +1,7 @@
 import { chromium } from "playwright";
+import fs from "fs";
 
-const SOURCE_URL = process.env.SOURCE_URL; // you paste this when running workflow
+const SOURCE_URL = process.env.SOURCE_URL;
 const WEBHOOK_URL = process.env.SHEETS_WEBHOOK_URL;
 const TOKEN = process.env.SHEETS_AUTH_TOKEN;
 
@@ -15,7 +16,6 @@ function nowISO() {
 }
 
 function makeTabName() {
-  // e.g. sold_2025-12-26_2359 (UTC)
   const d = new Date();
   const yyyy = d.getUTCFullYear();
   const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
@@ -26,73 +26,131 @@ function makeTabName() {
 }
 
 async function closeLoginPopup(page) {
-  // Try a few common “close” patterns; safe if not present.
+  // Run multiple passes; Whatnot often re-renders modal
   const selectors = [
     'button[aria-label="Close"]',
+    'button[aria-label="Dismiss"]',
     'button:has-text("Close")',
     'button:has-text("Not now")',
     'button:has-text("No thanks")',
     'button:has-text("Maybe later")',
-    '[role="dialog"] button',
+    '[role="dialog"] button[aria-label="Close"]',
+    '[role="dialog"] button:has-text("Close")',
+    '[role="dialog"] button:has-text("Not now")',
     '[data-testid*="close"]',
-    'button[aria-label="Dismiss"]',
+    '[data-testid*="Close"]',
+    '[data-testid="modal-close"]',
   ];
 
-  for (let i = 0; i < 6; i++) {
+  for (let pass = 0; pass < 8; pass++) {
     for (const sel of selectors) {
       const btn = await page.$(sel).catch(() => null);
       if (btn) {
-        await btn.click({ timeout: 2000 }).catch(() => {});
-        await sleep(400);
+        await btn.click({ timeout: 1500 }).catch(() => {});
+        await sleep(300);
       }
     }
     await page.keyboard.press("Escape").catch(() => {});
-    await sleep(400);
+    await sleep(300);
   }
 }
 
-async function clickByText(page, rx) {
+async function clickTabByText(page, rx) {
+  // More precise: look for tabs/buttons with text and click the nearest clickable parent.
   return await page.evaluate((pattern) => {
     const r = new RegExp(pattern, "i");
-    const els = [...document.querySelectorAll('[role="tab"],[role="button"],button,a,span,h5,div')];
-    const el = els.find((e) => r.test((e.textContent || "").trim()));
-    if (el) { el.click(); return true; }
+    const nodes = [...document.querySelectorAll("button,[role='tab'],a,[role='button'],div,span")];
+
+    const match = nodes.find((n) => r.test((n.textContent || "").trim()));
+    if (!match) return false;
+
+    // Prefer clicking button / role=tab / anchor, else walk up to a clickable parent
+    let el = match;
+    for (let i = 0; i < 5 && el; i++) {
+      const tag = (el.tagName || "").toLowerCase();
+      const role = el.getAttribute?.("role") || "";
+      if (tag === "button" || tag === "a" || role === "tab" || role === "button") break;
+      el = el.parentElement;
+    }
+
+    if (el && el.click) {
+      el.click();
+      return true;
+    }
     return false;
   }, rx.source);
 }
 
-async function main() {
-  const browser = await chromium.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-  });
+async function ensureSoldView(page) {
+  // We consider “Sold view” ready when listing links exist
+  const listingSelector = 'a[href^="/listing/"]';
 
-  const context = await browser.newContext({
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-    viewport: { width: 1400, height: 900 },
-    locale: "en-US",
-  });
+  // If already there, great
+  const already = await page.$(listingSelector).catch(() => null);
+  if (already) return true;
 
-  const page = await context.newPage();
+  // Try: close modal, click Shop, click Sold
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    await closeLoginPopup(page);
 
-  await page.goto(SOURCE_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
-  await sleep(2500);
-  await closeLoginPopup(page);
+    await clickTabByText(page, /\bshop\b/i);
+    await sleep(900);
+    await closeLoginPopup(page);
 
-  // Activate Shop -> Sold (same approach as your browser-console script)
-  await clickByText(page, /\bshop\b/i);
-  await sleep(800);
-  await closeLoginPopup(page);
+    await clickTabByText(page, /\bsold\b/i);
+    await sleep(1400);
+    await closeLoginPopup(page);
 
-  await clickByText(page, /\bsold\b/i);
-  await sleep(1500);
-  await closeLoginPopup(page);
+    // Wait for listings to show
+    const ok = await page
+      .waitForSelector(listingSelector, { timeout: 15000 })
+      .then(() => true)
+      .catch(() => false);
 
-  // Scrape inside the page context
-  const items = await page.evaluate(async () => {
+    if (ok) return true;
+
+    // Sometimes tabs are hidden until you scroll a bit
+    await page.mouse.wheel(0, 900).catch(() => {});
+    await sleep(1200);
+  }
+
+  // Try URL variants (sometimes params change which tab loads)
+  const variants = [
+    SOURCE_URL,
+    `${SOURCE_URL}${SOURCE_URL.includes("?") ? "&" : "?"}tab=sold`,
+    `${SOURCE_URL}${SOURCE_URL.includes("?") ? "&" : "?"}type=sold`,
+    `${SOURCE_URL}${SOURCE_URL.includes("?") ? "&" : "?"}view=sold`,
+  ];
+
+  for (const u of variants) {
+    await page.goto(u, { waitUntil: "domcontentloaded", timeout: 120000 }).catch(() => {});
+    await sleep(2500);
+    await closeLoginPopup(page);
+
+    const ok = await page
+      .waitForSelector(listingSelector, { timeout: 15000 })
+      .then(() => true)
+      .catch(() => false);
+
+    if (ok) return true;
+  }
+
+  return false;
+}
+
+async function saveDebug(page, label) {
+  const dir = "debug";
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir);
+
+  await page.screenshot({ path: `${dir}/${label}.png`, fullPage: true }).catch(() => {});
+  const html = await page.content().catch(() => "");
+  fs.writeFileSync(`${dir}/${label}.html`, html, "utf8");
+}
+
+async function scrapeSoldItems(page) {
+  // Run your original scrape logic inside the page
+  return await page.evaluate(async () => {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
     const sanitize = (s) => String(s == null ? "" : s).replace(/\r|\n/g, " ").trim();
 
     function findLiveGrid() {
@@ -212,6 +270,7 @@ async function main() {
         out.push({ title, buyer, price: Number.isFinite(price) ? price : 0 });
       }
 
+      // de-dup
       const seen = new Set();
       const uniq = [];
       for (const r of out) {
@@ -227,11 +286,10 @@ async function main() {
     const bag = new Map();
     const STEP = Math.max(200, scroller.clientHeight - 80);
 
-    // Big list = give it time
     const MAX_MS = 20 * 60 * 1000; // 20 minutes
     const start = performance.now();
 
-    async function waitForGrowth(prevCount, msMax = 15000) {
+    async function waitForGrowth(prevCount, msMax = 18000) {
       const end = performance.now() + msMax;
       while (performance.now() < end) {
         const chunk = parseVisible(scroller);
@@ -253,7 +311,7 @@ async function main() {
       const timedOut = performance.now() - start > MAX_MS;
 
       if (atBottom) {
-        const grew = await waitForGrowth(bag.size, 18000);
+        const grew = await waitForGrowth(bag.size, 20000);
         if (!grew) break;
       }
 
@@ -268,6 +326,40 @@ async function main() {
 
     return [...bag.values()];
   });
+}
+
+async function main() {
+  const browser = await chromium.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+  });
+
+  const context = await browser.newContext({
+    viewport: { width: 1400, height: 900 },
+    locale: "en-US",
+  });
+
+  const page = await context.newPage();
+
+  await page.goto(SOURCE_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
+  await sleep(2500);
+
+  const ok = await ensureSoldView(page);
+  if (!ok) {
+    await saveDebug(page, "not_on_sold");
+    await browser.close();
+    throw new Error("Could not reach Sold view (Shop -> Sold). Saved debug/not_on_sold.(png|html)");
+  }
+
+  // Extra settle time so the list finishes rendering
+  await sleep(2500);
+
+  const items = await scrapeSoldItems(page);
+
+  // If it found 0, capture debug artifacts so we can see why
+  if (!items.length) {
+    await saveDebug(page, "sold_zero_items");
+  }
 
   await browser.close();
 
