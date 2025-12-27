@@ -33,11 +33,10 @@ jobs:
           SHEETS_AUTH_TOKEN: ${{ secrets.SHEETS_AUTH_TOKEN_NEW }}
         run: node sold_export.js
 
-              - name: Upload debug artifacts
+      - name: Upload debug artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sold-export-debug
           path: debug
           if-no-files-found: ignore
-
